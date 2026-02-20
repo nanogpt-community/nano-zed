@@ -26,7 +26,13 @@ $Architecture = if ($Architecture) {
     $OSArchitecture
 }
 
-$CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
+$CargoTargetDir = if ($env:CARGO_TARGET_DIR) {
+    $env:CARGO_TARGET_DIR
+}
+else {
+    "target"
+}
+$CargoOutDir = Join-Path (Join-Path $CargoTargetDir "$Architecture-pc-windows-msvc") "release"
 
 function Get-VSArch {
     param(
@@ -113,9 +119,9 @@ function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe, cli.exe and auto_update_helper.exe
     cargo build --release --package zed --package cli --package auto_update_helper --target $target
-    Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    Copy-Item -Path (Join-Path $CargoOutDir "zed.exe") -Destination "$innoDir\Zed.exe" -Force
+    Copy-Item -Path (Join-Path $CargoOutDir "cli.exe") -Destination "$innoDir\cli.exe" -Force
+    Copy-Item -Path (Join-Path $CargoOutDir "auto_update_helper.exe") -Destination "$innoDir\auto_update_helper.exe" -Force
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
@@ -128,7 +134,7 @@ function BuildZedAndItsFriends {
             cargo build --release --package explorer_command_injector --target $target
         }
     }
-    Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
+    Copy-Item -Path (Join-Path $CargoOutDir "explorer_command_injector.dll") -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
 }
 
 function BuildRemoteServer {
@@ -136,7 +142,7 @@ function BuildRemoteServer {
     cargo build --release --package remote_server --target $target
 
     # Create zipped remote server binary
-    $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
+    $remoteServerSrc = (Resolve-Path (Join-Path $CargoOutDir "remote_server.exe")).Path
 
     if ($env:CI) {
         Write-Output "Code signing remote_server.exe"
@@ -152,14 +158,14 @@ function BuildRemoteServer {
 
 function ZipZedAndItsFriendsDebug {
     $items = @(
-        ".\$CargoOutDir\zed.pdb",
-        ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\auto_update_helper.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
-        ".\$CargoOutDir\remote_server.pdb"
+        (Join-Path $CargoOutDir "zed.pdb"),
+        (Join-Path $CargoOutDir "cli.pdb"),
+        (Join-Path $CargoOutDir "auto_update_helper.pdb"),
+        (Join-Path $CargoOutDir "explorer_command_injector.pdb"),
+        (Join-Path $CargoOutDir "remote_server.pdb")
     )
 
-    Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
+    Compress-Archive -Path $items -DestinationPath (Join-Path $CargoOutDir "zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip") -Force
 }
 
 
