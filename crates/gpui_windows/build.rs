@@ -1,11 +1,25 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(gpui_windows_embedded_shaders)");
+
+    let target_is_windows = std::env::var("CARGO_CFG_TARGET_OS")
+        .is_ok_and(|target_os| target_os == "windows");
+    if !target_is_windows {
+        return;
+    }
+
+    let debug_assertions_enabled = std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some();
+    if debug_assertions_enabled {
+        return;
+    }
+
+    // We can only run shader compilation when the build script is running on Windows.
+    // Non-Windows hosts cross-compiling to Windows will compile shaders at runtime.
     #[cfg(target_os = "windows")]
     {
-        // Compile HLSL shaders
-        #[cfg(not(debug_assertions))]
         compile_shaders();
+        println!("cargo:rustc-cfg=gpui_windows_embedded_shaders");
     }
 }
 
