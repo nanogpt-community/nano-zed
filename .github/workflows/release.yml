@@ -24,13 +24,13 @@ jobs:
       matrix:
         include:
           - platform: linux
-            runner: ubuntu-22.04
+            runner: blacksmith-8vcpu-ubuntu-2404
             artifact_file: nano-zed-linux-x86_64.tar.gz
           - platform: macos
-            runner: macos-14
+            runner: macos-latest
             artifact_file: nano-zed-macos-aarch64.dmg
           - platform: windows
-            runner: windows-2022
+            runner: blacksmith-8vcpu-windows-2025
             artifact_file: nano-zed-windows-x86_64.exe
 
     runs-on: ${{ matrix.runner }}
@@ -94,7 +94,7 @@ jobs:
         if: matrix.platform == 'macos'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
@@ -141,7 +141,7 @@ jobs:
 
   release:
     needs: build_installers
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
 
     steps:
       - name: Resolve release tag
