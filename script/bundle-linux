@@ -79,6 +79,14 @@ cargo build --release --target "${target_triple}" --package zed --package cli
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 if [[ "$remote_server_triple" == "$musl_triple" ]]; then
+    if command -v musl-gcc >/dev/null 2>&1; then
+        remote_server_target_env=${remote_server_triple//-/_}
+        remote_server_target_env_upper=${remote_server_target_env^^}
+        export "CC_${remote_server_target_env}=musl-gcc"
+        export "CARGO_TARGET_${remote_server_target_env_upper}_LINKER=musl-gcc"
+    else
+        echo "Warning: musl-gcc not found, using default compiler for ${remote_server_triple}."
+    fi
     export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
 fi
 cargo build --release --target "${remote_server_triple}" --package remote_server
