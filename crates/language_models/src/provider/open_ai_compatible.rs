@@ -1,8 +1,8 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use convert_case::{Case, Casing};
-use futures::{FutureExt, StreamExt, future::BoxFuture};
+use futures::{AsyncReadExt, FutureExt, StreamExt, future::BoxFuture, stream};
 use gpui::{AnyView, App, AsyncApp, Context, Entity, SharedString, Task, Window};
-use http_client::HttpClient;
+use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use language_model::{
     ApiKeyState, AuthenticateError, EnvVar, IconOrSvg, LanguageModel, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelId, LanguageModelName, LanguageModelProvider,
@@ -12,11 +12,15 @@ use language_model::{
 use menu;
 use open_ai::{
     ResponseStreamEvent,
-    responses::{Request as ResponseRequest, StreamEvent as ResponsesStreamEvent, stream_response},
-    stream_completion,
+    responses::{
+        Request as ResponseRequest, StreamEvent as ResponsesStreamEvent,
+        stream_response_with_headers,
+    },
+    stream_completion_with_headers,
 };
+use serde::Deserialize;
 use settings::{Settings, SettingsStore};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use ui::{ElevationIndex, Tooltip, prelude::*};
 use ui_input::InputField;
 use util::ResultExt;
@@ -26,6 +30,38 @@ use crate::provider::open_ai::{
 };
 pub use settings::OpenAiCompatibleAvailableModel as AvailableModel;
 pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
+
+const NANOGPT_PROVIDER_ID: &str = "nanogpt";
+const NANOGPT_API_KEY_ENV_VAR_NAME: &str = "NANOGPT_API_KEY";
+const NANOGPT_DEFAULT_MODEL_ID: &str = "minimax/minimax-m2.5";
+const NANOGPT_DEFAULT_MAX_INPUT_TOKENS: u64 = 200_000;
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedModel {
+    id: String,
+    request_model: String,
+    display_name: Option<String>,
+    max_tokens: u64,
+    max_output_tokens: Option<u64>,
+    max_completion_tokens: Option<u64>,
+    capabilities: ModelCapabilities,
+    provider_override: Option<String>,
+}
+
+impl ResolvedModel {
+    fn from_available_model(model: AvailableModel) -> Self {
+        Self {
+            id: model.name.clone(),
+            request_model: model.name,
+            display_name: model.display_name,
+            max_tokens: model.max_tokens,
+            max_output_tokens: model.max_output_tokens,
+            max_completion_tokens: model.max_completion_tokens,
+            capabilities: model.capabilities,
+            provider_override: None,
+        }
+    }
+}
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct OpenAiCompatibleSettings {
@@ -44,6 +80,10 @@ pub struct State {
     id: Arc<str>,
     api_key_state: ApiKeyState,
     settings: OpenAiCompatibleSettings,
+    http_client: Arc<dyn HttpClient>,
+    dynamic_models: Vec<ResolvedModel>,
+    fetch_dynamic_models_task: Option<Task<Result<(), LanguageModelCompletionError>>>,
+    fetch_provider_selection_task: Option<Task<Result<(), LanguageModelCompletionError>>>,
 }
 
 impl State {
@@ -52,15 +92,218 @@ impl State {
     }
 
     fn set_api_key(&mut self, api_key: Option<String>, cx: &mut Context<Self>) -> Task<Result<()>> {
+        if self.is_nanogpt() {
+            match &api_key {
+                Some(api_key) if !api_key.is_empty() => {
+                    std::env::set_var(NANOGPT_API_KEY_ENV_VAR_NAME, api_key)
+                }
+                _ => std::env::remove_var(NANOGPT_API_KEY_ENV_VAR_NAME),
+            }
+        }
+
         let api_url = SharedString::new(self.settings.api_url.as_str());
-        self.api_key_state
-            .store(api_url, api_key, |this| &mut this.api_key_state, cx)
+        let store_task =
+            self.api_key_state
+                .store(api_url, api_key, |this| &mut this.api_key_state, cx);
+
+        cx.spawn(async move |this, cx| {
+            let result = store_task.await;
+            this.update(cx, |this, cx| {
+                this.sync_nanogpt_api_key_env();
+                this.restart_dynamic_models_task(cx);
+            })
+            .ok();
+            result
+        })
     }
 
     fn authenticate(&mut self, cx: &mut Context<Self>) -> Task<Result<(), AuthenticateError>> {
         let api_url = SharedString::new(self.settings.api_url.clone());
-        self.api_key_state
-            .load_if_needed(api_url, |this| &mut this.api_key_state, cx)
+        let authenticate_task =
+            self.api_key_state
+                .load_if_needed(api_url, |this| &mut this.api_key_state, cx);
+
+        cx.spawn(async move |this, cx| {
+            let result = authenticate_task.await;
+            this.update(cx, |this, cx| {
+                this.sync_nanogpt_api_key_env();
+                this.restart_dynamic_models_task(cx);
+            })
+            .ok();
+            result
+        })
+    }
+
+    fn is_nanogpt(&self) -> bool {
+        self.id.as_ref() == NANOGPT_PROVIDER_ID
+    }
+
+    fn sync_nanogpt_api_key_env(&self) {
+        if !self.is_nanogpt() {
+            return;
+        }
+
+        if let Some(api_key) = self.api_key_state.key(&self.settings.api_url) {
+            std::env::set_var(NANOGPT_API_KEY_ENV_VAR_NAME, api_key.as_ref());
+        } else {
+            std::env::remove_var(NANOGPT_API_KEY_ENV_VAR_NAME);
+        }
+    }
+
+    fn restart_dynamic_models_task(&mut self, cx: &mut Context<Self>) {
+        if !self.is_nanogpt() {
+            self.dynamic_models.clear();
+            self.fetch_dynamic_models_task = None;
+            self.fetch_provider_selection_task = None;
+            return;
+        }
+
+        if !self.is_authenticated() {
+            self.dynamic_models.clear();
+            self.fetch_dynamic_models_task = None;
+            self.fetch_provider_selection_task = None;
+            cx.notify();
+            return;
+        }
+
+        let task = self.fetch_dynamic_models(cx);
+        self.fetch_dynamic_models_task = Some(task);
+    }
+
+    fn fetch_dynamic_models(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), LanguageModelCompletionError>> {
+        let http_client = self.http_client.clone();
+        let api_url = self.settings.api_url.clone();
+        let api_key = self.api_key_state.key(&api_url);
+
+        cx.spawn(async move |this, cx| {
+            let models = fetch_nanogpt_models(http_client.as_ref(), &api_url, api_key.as_deref())
+                .await
+                .map_err(LanguageModelCompletionError::Other)?;
+
+            this.update(cx, |this, cx| {
+                this.dynamic_models = models.clone();
+                cx.notify();
+                this.restart_provider_selection_task(models, cx);
+            })
+            .map_err(LanguageModelCompletionError::Other)?;
+
+            Ok(())
+        })
+    }
+
+    fn restart_provider_selection_task(
+        &mut self,
+        models: Vec<ResolvedModel>,
+        cx: &mut Context<Self>,
+    ) {
+        if models.is_empty() {
+            self.fetch_provider_selection_task = None;
+            return;
+        }
+
+        let task = self.fetch_provider_selection_models(models, cx);
+        self.fetch_provider_selection_task = Some(task);
+    }
+
+    fn fetch_provider_selection_models(
+        &mut self,
+        models: Vec<ResolvedModel>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), LanguageModelCompletionError>> {
+        let http_client = self.http_client.clone();
+        let api_url = self.settings.api_url.clone();
+        let api_key = self.api_key_state.key(&api_url);
+
+        cx.spawn(async move |this, cx| {
+            let provider_options = stream::iter(models.iter().cloned())
+                .map(|model| {
+                    let http_client = http_client.clone();
+                    let api_url = api_url.clone();
+                    let api_key = api_key.clone();
+                    async move {
+                        let providers = match fetch_nanogpt_model_providers(
+                            http_client.as_ref(),
+                            &api_url,
+                            &model.request_model,
+                            api_key.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(providers) => providers,
+                            Err(error) => {
+                                log::warn!(
+                                    "Failed fetching NanoGPT provider options for model {}: {error:#}",
+                                    model.request_model
+                                );
+                                Vec::new()
+                            }
+                        };
+                        (model, providers)
+                    }
+                })
+                .buffer_unordered(8)
+                .collect::<Vec<_>>()
+                .await;
+
+            let mut models_with_provider_options = Vec::new();
+            for (model, providers) in provider_options {
+                models_with_provider_options.push(model.clone());
+                for provider in providers {
+                    if provider.is_empty() {
+                        continue;
+                    }
+
+                    models_with_provider_options.push(ResolvedModel {
+                        id: format!("{}@{}", model.request_model, provider),
+                        request_model: model.request_model.clone(),
+                        display_name: Some(format!(
+                            "{} via {}",
+                            model
+                                .display_name
+                                .as_deref()
+                                .unwrap_or(model.request_model.as_str()),
+                            provider
+                        )),
+                        max_tokens: model.max_tokens,
+                        max_output_tokens: model.max_output_tokens,
+                        max_completion_tokens: model.max_completion_tokens,
+                        capabilities: model.capabilities.clone(),
+                        provider_override: Some(provider),
+                    });
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                this.dynamic_models = models_with_provider_options;
+                cx.notify();
+            })
+            .map_err(LanguageModelCompletionError::Other)?;
+
+            Ok(())
+        })
+    }
+
+    fn resolved_models(&self) -> Vec<ResolvedModel> {
+        let mut models = if self.is_nanogpt() && !self.dynamic_models.is_empty() {
+            self.dynamic_models.clone()
+        } else {
+            Vec::new()
+        };
+
+        for model in self.settings.available_models.iter().cloned() {
+            let resolved_model = ResolvedModel::from_available_model(model);
+            if !models
+                .iter()
+                .any(|existing| existing.id == resolved_model.id)
+            {
+                models.push(resolved_model);
+            }
+        }
+
+        models
     }
 }
 
@@ -86,6 +329,8 @@ impl OpenAiCompatibleLanguageModelProvider {
                         cx,
                     );
                     this.settings = settings;
+                    this.sync_nanogpt_api_key_env();
+                    this.restart_dynamic_models_task(cx);
                     cx.notify();
                 }
             })
@@ -98,8 +343,18 @@ impl OpenAiCompatibleLanguageModelProvider {
                     EnvVar::new(api_key_env_var_name),
                 ),
                 settings,
+                http_client: http_client.clone(),
+                dynamic_models: Vec::new(),
+                fetch_dynamic_models_task: None,
+                fetch_provider_selection_task: None,
             }
         });
+
+        if id.as_ref() == NANOGPT_PROVIDER_ID {
+            state
+                .update(cx, |state, cx| state.authenticate(cx))
+                .detach();
+        }
 
         Self {
             id: id.clone().into(),
@@ -109,9 +364,9 @@ impl OpenAiCompatibleLanguageModelProvider {
         }
     }
 
-    fn create_language_model(&self, model: AvailableModel) -> Arc<dyn LanguageModel> {
+    fn create_language_model(&self, model: ResolvedModel) -> Arc<dyn LanguageModel> {
         Arc::new(OpenAiCompatibleLanguageModel {
-            id: LanguageModelId::from(model.name.clone()),
+            id: LanguageModelId::from(model.id.clone()),
             provider_id: self.id.clone(),
             provider_name: self.name.clone(),
             model,
@@ -144,12 +399,21 @@ impl LanguageModelProvider for OpenAiCompatibleLanguageModelProvider {
     }
 
     fn default_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
-        self.state
-            .read(cx)
-            .settings
-            .available_models
-            .first()
-            .map(|model| self.create_language_model(model.clone()))
+        let state = self.state.read(cx);
+        let models = state.resolved_models();
+        let default_model = if state.is_nanogpt() {
+            models
+                .iter()
+                .find(|model| {
+                    model.request_model == NANOGPT_DEFAULT_MODEL_ID
+                        && model.provider_override.is_none()
+                })
+                .cloned()
+                .or_else(|| models.first().cloned())
+        } else {
+            models.first().cloned()
+        };
+        default_model.map(|model| self.create_language_model(model))
     }
 
     fn default_fast_model(&self, _cx: &App) -> Option<Arc<dyn LanguageModel>> {
@@ -159,8 +423,7 @@ impl LanguageModelProvider for OpenAiCompatibleLanguageModelProvider {
     fn provided_models(&self, cx: &App) -> Vec<Arc<dyn LanguageModel>> {
         self.state
             .read(cx)
-            .settings
-            .available_models
+            .resolved_models()
             .iter()
             .map(|model| self.create_language_model(model.clone()))
             .collect()
@@ -194,7 +457,7 @@ pub struct OpenAiCompatibleLanguageModel {
     id: LanguageModelId,
     provider_id: LanguageModelProviderId,
     provider_name: LanguageModelProviderName,
-    model: AvailableModel,
+    model: ResolvedModel,
     state: Entity<State>,
     http_client: Arc<dyn HttpClient>,
     request_limiter: RateLimiter,
@@ -221,18 +484,29 @@ impl OpenAiCompatibleLanguageModel {
                 state.settings.api_url.clone(),
             )
         });
+        let additional_headers =
+            self.model
+                .provider_override
+                .as_ref()
+                .map_or_else(Vec::new, |provider| {
+                    vec![
+                        ("X-Provider".to_string(), provider.to_string()),
+                        ("X-Billing-Mode".to_string(), "paygo".to_string()),
+                    ]
+                });
 
         let provider = self.provider_name.clone();
         let future = self.request_limiter.stream(async move {
             let Some(api_key) = api_key else {
                 return Err(LanguageModelCompletionError::NoApiKey { provider });
             };
-            let request = stream_completion(
+            let request = stream_completion_with_headers(
                 http_client.as_ref(),
                 provider.0.as_str(),
                 &api_url,
                 &api_key,
                 request,
+                &additional_headers,
             );
             let response = request.await?;
             Ok(response)
@@ -256,18 +530,29 @@ impl OpenAiCompatibleLanguageModel {
                 state.settings.api_url.clone(),
             )
         });
+        let additional_headers =
+            self.model
+                .provider_override
+                .as_ref()
+                .map_or_else(Vec::new, |provider| {
+                    vec![
+                        ("X-Provider".to_string(), provider.to_string()),
+                        ("X-Billing-Mode".to_string(), "paygo".to_string()),
+                    ]
+                });
 
         let provider = self.provider_name.clone();
         let future = self.request_limiter.stream(async move {
             let Some(api_key) = api_key else {
                 return Err(LanguageModelCompletionError::NoApiKey { provider });
             };
-            let request = stream_response(
+            let request = stream_response_with_headers(
                 http_client.as_ref(),
                 provider.0.as_str(),
                 &api_url,
                 &api_key,
                 request,
+                &additional_headers,
             );
             let response = request.await?;
             Ok(response)
@@ -287,7 +572,7 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
             self.model
                 .display_name
                 .clone()
-                .unwrap_or_else(|| self.model.name.clone()),
+                .unwrap_or_else(|| self.model.request_model.clone()),
         )
     }
 
@@ -324,7 +609,11 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
     }
 
     fn telemetry_id(&self) -> String {
-        format!("openai/{}", self.model.name)
+        if let Some(provider_override) = self.model.provider_override.as_deref() {
+            format!("openai/{}@{}", self.model.request_model, provider_override)
+        } else {
+            format!("openai/{}", self.model.request_model)
+        }
     }
 
     fn max_token_count(&self) -> u64 {
@@ -373,7 +662,7 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
         if self.model.capabilities.chat_completions {
             let request = into_open_ai(
                 request,
-                &self.model.name,
+                &self.model.request_model,
                 self.model.capabilities.parallel_tool_calls,
                 self.model.capabilities.prompt_cache_key,
                 self.max_output_tokens(),
@@ -388,7 +677,7 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
         } else {
             let request = into_open_ai_response(
                 request,
-                &self.model.name,
+                &self.model.request_model,
                 self.model.capabilities.parallel_tool_calls,
                 self.model.capabilities.prompt_cache_key,
                 self.max_output_tokens(),
@@ -402,6 +691,217 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
             .boxed()
         }
     }
+}
+
+#[derive(Default, Deserialize)]
+struct NanogptModelsResponse {
+    #[serde(default)]
+    models: NanogptModelCollections,
+}
+
+#[derive(Default, Deserialize)]
+struct NanogptModelCollections {
+    #[serde(default)]
+    text: BTreeMap<String, NanogptCatalogModel>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NanogptCatalogModel {
+    model: Option<String>,
+    name: Option<String>,
+    visible: Option<bool>,
+    max_input_tokens: Option<u64>,
+    max_output_tokens: Option<u64>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NanogptProvidersResponse {
+    #[serde(default)]
+    supports_provider_selection: bool,
+    #[serde(default)]
+    providers: Vec<NanogptProviderInfo>,
+}
+
+#[derive(Default, Deserialize)]
+struct NanogptProviderInfo {
+    provider: String,
+    #[serde(default)]
+    available: bool,
+}
+
+fn nanogpt_capabilities(capabilities: &[String]) -> ModelCapabilities {
+    let has_capability = |capability: &str| {
+        capabilities
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(capability))
+    };
+    let tools = has_capability("tool-calling");
+    ModelCapabilities {
+        tools,
+        images: has_capability("vision"),
+        parallel_tool_calls: tools,
+        prompt_cache_key: false,
+        chat_completions: true,
+    }
+}
+
+fn nanogpt_api_base_url(api_url: &str) -> String {
+    let trimmed = api_url.trim_end_matches('/');
+    if let Some(stripped) = trimmed.strip_suffix("/v1") {
+        stripped.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn fetch_nanogpt_models(
+    http_client: &dyn HttpClient,
+    api_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<ResolvedModel>> {
+    let uri = format!("{}/models?detailed=true", nanogpt_api_base_url(api_url));
+    let mut request_builder = HttpRequest::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Accept", "application/json");
+    if let Some(api_key) = api_key
+        && !api_key.is_empty()
+    {
+        request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let request = request_builder
+        .body(AsyncBody::default())
+        .map_err(|error| anyhow!(error))?;
+
+    let mut response = http_client.send(request).await?;
+    let status_code = response.status();
+    let mut body = String::new();
+    response
+        .body_mut()
+        .read_to_string(&mut body)
+        .await
+        .map_err(|error| anyhow!(error))?;
+
+    if !status_code.is_success() {
+        return Err(anyhow!(
+            "NanoGPT model listing request failed with status {}: {}",
+            status_code,
+            body
+        ));
+    }
+
+    let mut models = Vec::new();
+    let response: NanogptModelsResponse = serde_json::from_str(&body)?;
+    for (key, model) in response.models.text {
+        if model.visible == Some(false) {
+            continue;
+        }
+
+        let request_model = model.model.unwrap_or(key);
+        let max_tokens = model
+            .max_input_tokens
+            .filter(|max_tokens| *max_tokens > 0)
+            .unwrap_or(NANOGPT_DEFAULT_MAX_INPUT_TOKENS);
+        let max_output_tokens = model.max_output_tokens.filter(|max_tokens| *max_tokens > 0);
+
+        models.push(ResolvedModel {
+            id: request_model.clone(),
+            request_model,
+            display_name: model.name,
+            max_tokens,
+            max_output_tokens,
+            max_completion_tokens: max_output_tokens,
+            capabilities: nanogpt_capabilities(&model.capabilities),
+            provider_override: None,
+        });
+    }
+
+    models.sort_by(|left, right| {
+        if left.request_model == NANOGPT_DEFAULT_MODEL_ID {
+            return std::cmp::Ordering::Less;
+        }
+        if right.request_model == NANOGPT_DEFAULT_MODEL_ID {
+            return std::cmp::Ordering::Greater;
+        }
+        left.display_name
+            .as_deref()
+            .unwrap_or(left.request_model.as_str())
+            .cmp(
+                right
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(right.request_model.as_str()),
+            )
+    });
+
+    Ok(models)
+}
+
+async fn fetch_nanogpt_model_providers(
+    http_client: &dyn HttpClient,
+    api_url: &str,
+    model_id: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>> {
+    let uri = format!(
+        "{}/models/{}/providers",
+        nanogpt_api_base_url(api_url),
+        urlencoding::encode(model_id)
+    );
+    let mut request_builder = HttpRequest::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Accept", "application/json");
+    if let Some(api_key) = api_key
+        && !api_key.is_empty()
+    {
+        request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let request = request_builder
+        .body(AsyncBody::default())
+        .map_err(|error| anyhow!(error))?;
+
+    let mut response = http_client.send(request).await?;
+    let status_code = response.status();
+    let mut body = String::new();
+    response
+        .body_mut()
+        .read_to_string(&mut body)
+        .await
+        .map_err(|error| anyhow!(error))?;
+
+    if !status_code.is_success() {
+        return Err(anyhow!(
+            "NanoGPT provider listing request failed with status {} for model {}: {}",
+            status_code,
+            model_id,
+            body
+        ));
+    }
+
+    let response: NanogptProvidersResponse = serde_json::from_str(&body)?;
+    if !response.supports_provider_selection {
+        return Ok(Vec::new());
+    }
+
+    let mut providers = response
+        .providers
+        .into_iter()
+        .filter_map(|provider_info| {
+            if provider_info.available && !provider_info.provider.is_empty() {
+                Some(provider_info.provider)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers.dedup();
+    Ok(providers)
 }
 
 struct ConfigurationView {
@@ -429,8 +929,11 @@ impl ConfigurationView {
             let state = state.clone();
             async move |this, cx| {
                 if let Some(task) = Some(state.update(cx, |state, cx| state.authenticate(cx))) {
-                    // We don't log an error, because "not signed in" is also an error.
-                    let _ = task.await;
+                    if let Err(error) = task.await {
+                        log::debug!(
+                            "OpenAI-compatible provider authentication failed while loading credentials: {error:#}"
+                        );
+                    }
                 }
                 this.update(cx, |this, cx| {
                     this.load_credentials_task = None;
@@ -489,11 +992,16 @@ impl Render for ConfigurationView {
         let state = self.state.read(cx);
         let env_var_set = state.api_key_state.is_from_env_var();
         let env_var_name = state.api_key_state.env_var_name();
+        let setup_message = if state.is_nanogpt() {
+            "To use nano-zed's agent with NanoGPT, you need to add a NanoGPT API key."
+        } else {
+            "To use nano-zed's agent with an OpenAI-compatible provider, you need to add an API key."
+        };
 
         let api_key_section = if self.should_render_editor(cx) {
             v_flex()
                 .on_action(cx.listener(Self::save_api_key))
-                .child(Label::new("To use Zed's agent with an OpenAI-compatible provider, you need to add an API key."))
+                .child(Label::new(setup_message))
                 .child(
                     div()
                         .pt(DynamicSpacing::Base04.rems(cx))
@@ -501,7 +1009,9 @@ impl Render for ConfigurationView {
                 )
                 .child(
                     Label::new(
-                        format!("You can also set the {env_var_name} environment variable and restart Zed."),
+                        format!(
+                            "You can also set the {env_var_name} environment variable and restart nano-zed."
+                        ),
                     )
                     .size(LabelSize::Small).color(Color::Muted),
                 )

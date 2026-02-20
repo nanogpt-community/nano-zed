@@ -3354,13 +3354,13 @@ impl AcpThreadView {
         let following = self.is_following(cx);
 
         let tooltip_label = if following {
-            if self.agent_name == "Zed Agent" {
+            if self.agent_name == "nano-zed Agent" {
                 format!("Stop Following the {}", self.agent_name)
             } else {
                 format!("Stop Following {}", self.agent_name)
             }
         } else {
-            if self.agent_name == "Zed Agent" {
+            if self.agent_name == "nano-zed Agent" {
                 format!("Follow the {}", self.agent_name)
             } else {
                 format!("Follow {}", self.agent_name)
@@ -6924,7 +6924,7 @@ impl AcpThreadView {
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
-        // For native agent (Zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
+        // For native agent (nano-zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
         // For ACP agents, use the agent name (e.g., "Claude Agent", "Gemini CLI")
         // This provides better clarity about what refused the request
         if self.as_native_connection(cx).is_some() {

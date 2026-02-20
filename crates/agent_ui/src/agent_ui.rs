@@ -23,7 +23,10 @@ mod text_thread_history;
 mod ui;
 
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 // Another comment
 use agent_settings::{AgentProfileId, AgentSettings};
@@ -55,6 +58,10 @@ pub use crate::inline_assistant::InlineAssistant;
 pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
 pub use text_thread_editor::{AgentPanelDelegate, TextThreadEditor};
 use zed_actions;
+use zed_actions::agent::OpenSettings;
+
+const NANOGPT_PROVIDER_ID: &str = "nanogpt";
+static NANOGPT_STARTUP_PROMPT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 actions!(
     agent,
@@ -294,7 +301,8 @@ pub fn init(
     inline_assistant::init(fs.clone(), prompt_builder.clone(), cx);
     terminal_inline_assistant::init(fs.clone(), prompt_builder, cx);
     cx.observe_new(move |workspace, window, cx| {
-        ConfigureContextServerModal::register(workspace, language_registry.clone(), window, cx)
+        ConfigureContextServerModal::register(workspace, language_registry.clone(), window, cx);
+        maybe_prompt_for_nanogpt_api_key_on_startup(window, cx);
     })
     .detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
@@ -339,6 +347,68 @@ pub fn init(
 
     cx.on_flags_ready(|_, cx| {
         update_command_palette_filter(cx);
+    })
+    .detach();
+}
+
+fn maybe_prompt_for_nanogpt_api_key_on_startup(
+    window: Option<&mut Window>,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(window) = window else {
+        return;
+    };
+
+    let uses_nanogpt_as_default = AgentSettings::get_global(cx)
+        .default_model
+        .as_ref()
+        .is_some_and(|model| model.provider.0 == NANOGPT_PROVIDER_ID);
+    if !uses_nanogpt_as_default {
+        return;
+    }
+
+    if NANOGPT_STARTUP_PROMPT_SHOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let provider_id = LanguageModelProviderId::from(NANOGPT_PROVIDER_ID.to_string());
+    let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id) else {
+        return;
+    };
+
+    cx.spawn_in(window, async move |_, cx| {
+        if let Ok(authenticate_task) = cx.update(|_, cx| provider.authenticate(cx))
+            && let Err(error) = authenticate_task.await
+        {
+            log::debug!("NanoGPT provider authentication failed during startup check: {error:#}");
+        }
+
+        let is_authenticated = cx
+            .update(|_, cx| provider.is_authenticated(cx))
+            .unwrap_or(false);
+        if is_authenticated {
+            return;
+        }
+
+        let should_open_settings = cx
+            .prompt(
+                gpui::PromptLevel::Warning,
+                "NanoGPT API key required",
+                Some(
+                    "NanoGPT is your default agent provider and the built-in NanoGPT MCP server also needs this key. Configure it now?",
+                ),
+                &["Configure", "Later"],
+            )
+            .await
+            .ok()
+            == Some(0);
+
+        if should_open_settings {
+            cx.update(|window, cx| {
+                window.dispatch_action(OpenSettings.boxed_clone(), cx);
+            })
+            .ok();
+        }
     })
     .detach();
 }

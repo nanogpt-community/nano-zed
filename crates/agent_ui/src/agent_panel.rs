@@ -361,7 +361,7 @@ pub enum AgentType {
 impl AgentType {
     fn label(&self) -> SharedString {
         match self {
-            Self::NativeAgent | Self::TextThread => "Zed Agent".into(),
+            Self::NativeAgent | Self::TextThread => "nano-zed Agent".into(),
             Self::Gemini => "Gemini CLI".into(),
             Self::ClaudeAgent => "Claude Agent".into(),
             Self::Codex => "Codex".into(),
@@ -2423,7 +2423,7 @@ impl AgentPanel {
                                 }
                             })
                             .item(
-                                ContextMenuEntry::new("Zed Agent")
+                                ContextMenuEntry::new("nano-zed Agent")
                                     .when(
                                         is_agent_selected(AgentType::NativeAgent)
                                             | is_agent_selected(AgentType::TextThread),

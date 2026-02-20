@@ -549,12 +549,27 @@ pub async fn stream_completion(
     api_key: &str,
     request: Request,
 ) -> Result<BoxStream<'static, Result<ResponseStreamEvent>>, RequestError> {
+    stream_completion_with_headers(client, provider_name, api_url, api_key, request, &[]).await
+}
+
+pub async fn stream_completion_with_headers(
+    client: &dyn HttpClient,
+    provider_name: &str,
+    api_url: &str,
+    api_key: &str,
+    request: Request,
+    additional_headers: &[(String, String)],
+) -> Result<BoxStream<'static, Result<ResponseStreamEvent>>, RequestError> {
     let uri = format!("{api_url}/chat/completions");
-    let request_builder = HttpRequest::builder()
+    let mut request_builder = HttpRequest::builder()
         .method(Method::POST)
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key.trim()));
+
+    for (header_name, header_value) in additional_headers {
+        request_builder = request_builder.header(header_name.as_str(), header_value.as_str());
+    }
 
     let request = request_builder
         .body(AsyncBody::from(

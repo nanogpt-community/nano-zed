@@ -328,15 +328,15 @@ impl AgentRegistryPage {
         for feature in &self.upsells {
             let banner = match feature {
                 BuiltInAgent::Claude => self.render_feature_upsell_banner(
-                    "Claude Agent support is built-in to Zed!".into(),
+                    "Claude Agent support is built-in to nano-zed!".into(),
                     "https://zed.dev/docs/ai/external-agents#claude-agent".into(),
                 ),
                 BuiltInAgent::Codex => self.render_feature_upsell_banner(
-                    "Codex CLI support is built-in to Zed!".into(),
+                    "Codex CLI support is built-in to nano-zed!".into(),
                     "https://zed.dev/docs/ai/external-agents#codex-cli".into(),
                 ),
                 BuiltInAgent::Gemini => self.render_feature_upsell_banner(
-                    "Gemini CLI support is built-in to Zed!".into(),
+                    "Gemini CLI support is built-in to nano-zed!".into(),
                     "https://zed.dev/docs/ai/external-agents#gemini-cli".into(),
                 ),
             };

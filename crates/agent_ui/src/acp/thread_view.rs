@@ -1399,7 +1399,7 @@ impl AcpServerView {
                         this,
                         AuthRequired {
                             description: Some(
-                                "GOOGLE_API_KEY must be set in the environment to use Vertex AI authentication for Gemini CLI. Please export it and restart Zed."
+                                "GOOGLE_API_KEY must be set in the environment to use Vertex AI authentication for Gemini CLI. Please export it and restart nano-zed."
                                     .to_owned(),
                             ),
                             provider_id: None,
@@ -1910,7 +1910,7 @@ impl AcpServerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (heading_label, description_label) = (
-            format!("Upgrade {} to work with Zed", self.agent.name()),
+            format!("Upgrade {} to work with nano-zed", self.agent.name()),
             if version.is_empty() {
                 format!(
                     "Currently using {}, which does not report a valid --version",
@@ -2381,7 +2381,7 @@ impl AcpServerView {
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
-        // For native agent (Zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
+        // For native agent (nano-zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
         // For ACP agents, use the agent name (e.g., "Claude Agent", "Gemini CLI")
         // This provides better clarity about what refused the request
         if self.as_native_connection(cx).is_some() {
@@ -2441,7 +2441,7 @@ fn loading_contents_spinner(size: IconSize) -> AnyElement {
 }
 
 fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == "Zed Agent" {
+    if agent_name == "nano-zed Agent" {
         format!("Message the {} — @ to include context", agent_name)
     } else if has_commands {
         format!(

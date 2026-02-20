@@ -189,8 +189,8 @@ fn main() {
             res.set_toolkit_path(explicit_rc_toolkit_path.as_str());
         }
         res.set_icon(icon.to_str().unwrap());
-        res.set("FileDescription", "Zed");
-        res.set("ProductName", "Zed");
+        res.set("FileDescription", "nano-zed");
+        res.set("ProductName", "nano-zed");
 
         if let Err(e) = res.compile() {
             eprintln!("{}", e);

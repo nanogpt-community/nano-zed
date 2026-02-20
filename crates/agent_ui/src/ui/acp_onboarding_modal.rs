@@ -182,9 +182,9 @@ impl Render for AcpOnboardingModal {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
-            .child(Headline::new("Bring Your Own Agent to Zed").size(HeadlineSize::Large));
+            .child(Headline::new("Bring Your Own Agent to nano-zed").size(HeadlineSize::Large));
 
-        let copy = "Bring the agent of your choice to Zed via our new Agent Client Protocol (ACP), starting with Google's Gemini CLI integration.";
+        let copy = "Bring the agent of your choice to nano-zed via our new Agent Client Protocol (ACP), starting with Google's Gemini CLI integration.";
 
         let open_panel_button = Button::new("open-panel", "Start with Gemini CLI")
             .icon_size(IconSize::Indicator)

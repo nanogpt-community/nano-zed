@@ -981,12 +981,20 @@ mod flatpak {
     }
 
     pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
+        let is_zed_flatpak = |id: &str| id.starts_with("dev.zed.Zed");
+        let is_nano_zed_flatpak = |id: &str| id.starts_with("dev.nanogpt.NanoZed");
         if env::var(NO_ESCAPE_ENV_NAME).is_ok()
-            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("dev.zed.Zed"))
+            && env::var("FLATPAK_ID")
+                .is_ok_and(|id| is_zed_flatpak(&id) || is_nano_zed_flatpak(&id))
             && args.zed.is_none()
         {
             args.zed = Some("/app/libexec/zed-editor".into());
-            unsafe { env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed") };
+            unsafe {
+                env::set_var(
+                    "ZED_UPDATE_EXPLANATION",
+                    "Please use flatpak to update nano-zed",
+                )
+            };
         }
         args
     }
@@ -997,7 +1005,9 @@ mod flatpak {
         }
 
         if let Ok(flatpak_id) = env::var("FLATPAK_ID") {
-            if !flatpak_id.starts_with("dev.zed.Zed") {
+            if !flatpak_id.starts_with("dev.zed.Zed")
+                && !flatpak_id.starts_with("dev.nanogpt.NanoZed")
+            {
                 return None;
             }
 
