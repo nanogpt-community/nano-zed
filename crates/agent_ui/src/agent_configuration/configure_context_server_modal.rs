@@ -29,6 +29,16 @@ use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
 use crate::AddContextServer;
+const NANOGPT_CONTEXT_SERVER_ID: &str = "nanogpt";
+
+fn default_nanogpt_context_server_command() -> ContextServerCommand {
+    ContextServerCommand {
+        path: "npx".into(),
+        args: vec!["-y".to_string(), "@nanogpt/mcp".to_string()],
+        env: None,
+        timeout: None,
+    }
+}
 
 enum ConfigurationTarget {
     New,
@@ -358,7 +368,7 @@ impl ConfigureContextServerModal {
     pub fn register(
         workspace: &mut Workspace,
         language_registry: Arc<LanguageRegistry>,
-        _window: Option<&mut Window>,
+        _window: Option<&Window>,
         _cx: &mut Context<Workspace>,
     ) {
         workspace.register_action({
@@ -423,10 +433,11 @@ impl ConfigureContextServerModal {
                     headers,
                 }),
                 ContextServerSettings::Extension { .. } => {
-                    match workspace
+                    let resolve_server_id = server_id.clone();
+                    let extension_target = match workspace
                         .update(cx, |workspace, cx| {
                             resolve_context_server_extension(
-                                server_id,
+                                resolve_server_id,
                                 workspace.project().read(cx).worktree_store(),
                                 cx,
                             )
@@ -435,7 +446,16 @@ impl ConfigureContextServerModal {
                     {
                         Some(task) => task.await,
                         None => None,
-                    }
+                    };
+
+                    extension_target.or_else(|| {
+                        (server_id.0.as_ref() == NANOGPT_CONTEXT_SERVER_ID).then(|| {
+                            ConfigurationTarget::Existing {
+                                id: server_id,
+                                command: default_nanogpt_context_server_command(),
+                            }
+                        })
+                    })
                 }
             };
 

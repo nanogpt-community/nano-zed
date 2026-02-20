@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example: v0.1.0 or 0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -32,6 +38,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure Windows cargo paths
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'C:\.cargo' -Force | Out-Null
+          New-Item -ItemType Directory -Path 'C:\.rustup' -Force | Out-Null
+          New-Item -ItemType Directory -Path 'C:\t' -Force | Out-Null
+          "CARGO_HOME=C:\.cargo" >> $env:GITHUB_ENV
+          "RUSTUP_HOME=C:\.rustup" >> $env:GITHUB_ENV
+          "CARGO_TARGET_DIR=C:\t" >> $env:GITHUB_ENV
+          "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $env:GITHUB_ENV
+          git config --global core.longpaths true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -117,6 +136,29 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Resolve release tag
+        id: resolve_tag
+        shell: bash
+        env:
+          MANUAL_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${MANUAL_VERSION}"
+            if [[ "${tag}" != v* ]]; then
+              tag="v${tag}"
+            fi
+          fi
+
+          if [[ ! "${tag}" =~ ^v.+ ]]; then
+            echo "Invalid release tag: ${tag}"
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
       - name: Download installer artifacts
         uses: actions/download-artifact@v4
         with:
@@ -129,5 +171,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true

@@ -123,6 +123,7 @@ impl Mercury {
                     content: open_ai::MessageContent::Plain(prompt),
                 }],
                 stream: false,
+                billing_mode: None,
                 max_completion_tokens: None,
                 stop: vec![],
                 temperature: None,

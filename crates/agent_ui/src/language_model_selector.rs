@@ -14,7 +14,7 @@ use language_model::{
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
 use settings::Settings;
-use ui::prelude::*;
+use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use zed_actions::agent::OpenSettings;
 
 use crate::ui::{ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem};
@@ -23,7 +23,13 @@ type OnModelChanged = Arc<dyn Fn(Arc<dyn LanguageModel>, &mut App) + 'static>;
 type GetActiveModel = Arc<dyn Fn(&App) -> Option<ConfiguredModel> + 'static>;
 type OnToggleFavorite = Arc<dyn Fn(Arc<dyn LanguageModel>, bool, &mut App) + 'static>;
 
+const NANOGPT_PROVIDER_ID: &str = "nanogpt";
+
 pub type LanguageModelSelector = Picker<LanguageModelPickerDelegate>;
+
+fn parse_nanogpt_provider_variant_model_id(model_id: &LanguageModelId) -> Option<(&str, &str)> {
+    model_id.0.as_ref().rsplit_once('@')
+}
 
 pub fn language_model_selector(
     get_active_model: impl Fn(&App) -> Option<ConfiguredModel> + 'static,
@@ -288,6 +294,74 @@ impl LanguageModelPickerDelegate {
         let new_index =
             Self::get_active_model_index(&self.filtered_entries, (self.get_active_model)(cx));
         self.set_selected_index(new_index, window, cx);
+    }
+
+    fn provider_selection_models_for_model(
+        &self,
+        model: &Arc<dyn LanguageModel>,
+    ) -> Vec<Arc<dyn LanguageModel>> {
+        if model.provider_id().0.as_ref() != NANOGPT_PROVIDER_ID {
+            return Vec::new();
+        }
+
+        let model_id = model.id();
+        let base_model_id = parse_nanogpt_provider_variant_model_id(&model_id)
+            .map(|(base_model_id, _)| base_model_id)
+            .unwrap_or(model_id.0.as_ref());
+
+        let mut selection_models = Vec::new();
+        let mut seen_model_ids = HashSet::default();
+
+        if let Some(models_for_provider) = self.all_models.all.get(&model.provider_id()) {
+            if let Some(base_model) = models_for_provider
+                .iter()
+                .find(|candidate| candidate.model.id().0.as_ref() == base_model_id)
+                .map(|candidate| candidate.model.clone())
+                && seen_model_ids.insert(base_model.id())
+            {
+                selection_models.push(base_model);
+            }
+
+            for model_info in models_for_provider {
+                let candidate_model_id = model_info.model.id();
+                let Some((candidate_base_model_id, _)) =
+                    parse_nanogpt_provider_variant_model_id(&candidate_model_id)
+                else {
+                    continue;
+                };
+                if candidate_base_model_id != base_model_id {
+                    continue;
+                }
+
+                let candidate_model = model_info.model.clone();
+                if seen_model_ids.insert(candidate_model.id()) {
+                    selection_models.push(candidate_model);
+                }
+            }
+        }
+
+        if selection_models.is_empty() {
+            selection_models.push(model.clone());
+        }
+
+        selection_models
+    }
+
+    fn active_provider_override_for_cycle_models(
+        selection_models: &[Arc<dyn LanguageModel>],
+        active_model: Option<&ConfiguredModel>,
+    ) -> Option<String> {
+        let active_model = active_model?;
+        let is_active_model_in_selection = selection_models.iter().any(|candidate| {
+            candidate.provider_id() == active_model.provider.id()
+                && candidate.id() == active_model.model.id()
+        });
+        if !is_active_model_in_selection {
+            return None;
+        }
+
+        parse_nanogpt_provider_variant_model_id(&active_model.model.id())
+            .map(|(_, provider_override)| provider_override.to_string())
     }
 }
 
@@ -566,7 +640,7 @@ impl PickerDelegate for LanguageModelPickerDelegate {
             LanguageModelPickerEntry::Model(model_info) => {
                 let active_model = (self.get_active_model)(cx);
                 let active_provider_id = active_model.as_ref().map(|m| m.provider.id());
-                let active_model_id = active_model.map(|m| m.model.id());
+                let active_model_id = active_model.as_ref().map(|m| m.model.id());
 
                 let is_selected = Some(model_info.model.provider_id()) == active_provider_id
                     && Some(model_info.model.id()) == active_model_id;
@@ -586,20 +660,82 @@ impl PickerDelegate for LanguageModelPickerDelegate {
                     })
                 };
 
-                Some(
-                    ModelSelectorListItem::new(ix, model_info.model.name().0)
-                        .map(|this| match &model_info.icon {
-                            IconOrSvg::Icon(icon_name) => this.icon(*icon_name),
-                            IconOrSvg::Svg(icon_path) => this.icon_path(icon_path.clone()),
-                        })
-                        .is_selected(is_selected)
-                        .is_focused(selected)
-                        .is_latest(model_info.model.is_latest())
-                        .is_favorite(is_favorite)
-                        .cost_info(model_cost)
-                        .on_toggle_favorite(handle_action_click)
-                        .into_any_element(),
-                )
+                let provider_selection_models =
+                    self.provider_selection_models_for_model(&model_info.model);
+                let provider_selector =
+                    if model_info.model.provider_id().0.as_ref() == NANOGPT_PROVIDER_ID {
+                        let selected_provider = Self::active_provider_override_for_cycle_models(
+                            &provider_selection_models,
+                            active_model.as_ref(),
+                        )
+                        .unwrap_or_else(|| "Auto".to_string());
+                        let provider_selection_tooltip = if selected_provider == "Auto" {
+                            if provider_selection_models.len() > 1 {
+                                "Provider Selection: automatic".to_string()
+                            } else {
+                                "Provider Selection: not available for this model".to_string()
+                            }
+                        } else {
+                            format!("Provider Selection: {selected_provider}")
+                        };
+                        let provider_menu_entries = provider_selection_models
+                            .iter()
+                            .map(|model| {
+                                let label = parse_nanogpt_provider_variant_model_id(&model.id())
+                                    .map(|(_, provider_override)| provider_override.to_string())
+                                    .unwrap_or_else(|| "Auto".to_string());
+                                (SharedString::from(label), model.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        let on_model_changed = self.on_model_changed.clone();
+
+                        Some(
+                            PopoverMenu::new(("provider-selection", ix))
+                                .trigger(
+                                    Button::new(("provider-selection-trigger", ix), "Provider")
+                                        .style(ButtonStyle::Subtle)
+                                        .label_size(LabelSize::XSmall)
+                                        .icon(IconName::ChevronDown)
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text(provider_selection_tooltip)),
+                                )
+                                .menu(move |window, cx| {
+                                    let provider_menu_entries = provider_menu_entries.clone();
+                                    let on_model_changed = on_model_changed.clone();
+                                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                                        for (label, model) in provider_menu_entries.iter() {
+                                            let label = label.clone();
+                                            let model = model.clone();
+                                            let on_model_changed = on_model_changed.clone();
+                                            menu = menu.entry(label, None, move |_, cx| {
+                                                on_model_changed(model.clone(), cx);
+                                            });
+                                        }
+                                        menu
+                                    }))
+                                }),
+                        )
+                    } else {
+                        None
+                    };
+
+                let mut list_item = ModelSelectorListItem::new(ix, model_info.model.name().0)
+                    .map(|this| match &model_info.icon {
+                        IconOrSvg::Icon(icon_name) => this.icon(*icon_name),
+                        IconOrSvg::Svg(icon_path) => this.icon_path(icon_path.clone()),
+                    })
+                    .is_selected(is_selected)
+                    .is_focused(selected)
+                    .is_latest(model_info.model.is_latest())
+                    .is_favorite(is_favorite)
+                    .cost_info(model_cost)
+                    .on_toggle_favorite(handle_action_click);
+
+                if let Some(provider_selector) = provider_selector {
+                    list_item = list_item.provider_selector(provider_selector);
+                }
+
+                Some(list_item.into_any_element())
             }
         }
     }

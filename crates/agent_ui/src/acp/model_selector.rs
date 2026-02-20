@@ -24,6 +24,19 @@ use zed_actions::agent::OpenSettings;
 use crate::ui::{HoldForDefault, ModelSelectorFooter, ModelSelectorHeader, ModelSelectorListItem};
 
 pub type AcpModelSelector = Picker<AcpModelPickerDelegate>;
+const NANOGPT_PROVIDER_ID: &str = "nanogpt";
+
+fn parse_provider_variant_model_id(model_id: &ModelId) -> Option<(&str, &str)> {
+    model_id.0.as_ref().rsplit_once('@')
+}
+
+fn is_nanogpt_model_id(model_id: &ModelId) -> bool {
+    model_id
+        .0
+        .as_ref()
+        .split_once('/')
+        .is_some_and(|(provider_id, _)| provider_id == NANOGPT_PROVIDER_ID)
+}
 
 pub fn acp_model_selector(
     selector: Rc<dyn AgentModelSelector>,
@@ -55,6 +68,7 @@ pub struct AcpModelPickerDelegate {
     selected_index: usize,
     selected_description: Option<(usize, SharedString, bool)>,
     selected_model: Option<AgentModelInfo>,
+    open_provider_options_for_model_id: Option<ModelId>,
     favorites: HashSet<ModelId>,
     _refresh_models_task: Task<()>,
     _settings_subscription: Subscription,
@@ -125,6 +139,7 @@ impl AcpModelPickerDelegate {
             filtered_entries: Vec::new(),
             models: None,
             selected_model: None,
+            open_provider_options_for_model_id: None,
             selected_index: 0,
             selected_description: None,
             favorites,
@@ -194,6 +209,71 @@ impl AcpModelPickerDelegate {
         } else {
             cx.notify();
         }
+    }
+
+    fn provider_selection_models_for_model(&self, model: &AgentModelInfo) -> Vec<AgentModelInfo> {
+        if !is_nanogpt_model_id(&model.id) {
+            return Vec::new();
+        }
+
+        let base_model_id = parse_provider_variant_model_id(&model.id)
+            .map(|(base_model_id, _)| base_model_id)
+            .unwrap_or(model.id.0.as_ref());
+
+        let mut selection_models = Vec::new();
+        let mut seen_model_ids = HashSet::default();
+
+        if let Some(models) = &self.models {
+            let all_models: Vec<&AgentModelInfo> = match models {
+                AgentModelList::Flat(list) => list.iter().collect(),
+                AgentModelList::Grouped(index_map) => index_map.values().flatten().collect(),
+            };
+
+            if let Some(base_model) = all_models
+                .iter()
+                .find(|candidate| candidate.id.0.as_ref() == base_model_id)
+                && seen_model_ids.insert(base_model.id.clone())
+            {
+                selection_models.push((**base_model).clone());
+            }
+
+            for candidate_model in all_models {
+                let Some((candidate_base_model_id, _)) =
+                    parse_provider_variant_model_id(&candidate_model.id)
+                else {
+                    continue;
+                };
+                if candidate_base_model_id != base_model_id {
+                    continue;
+                }
+
+                if seen_model_ids.insert(candidate_model.id.clone()) {
+                    selection_models.push(candidate_model.clone());
+                }
+            }
+        }
+
+        if selection_models.is_empty() {
+            selection_models.push(model.clone());
+        }
+
+        selection_models
+    }
+
+    fn active_provider_override_for_cycle_models(
+        selection_models: &[AgentModelInfo],
+        active_model: Option<&AgentModelInfo>,
+    ) -> Option<String> {
+        let active_model = active_model?;
+        let is_active_model_in_selection = selection_models
+            .iter()
+            .any(|candidate| candidate.id == active_model.id);
+        if !is_active_model_in_selection {
+            return None;
+        }
+
+        parse_provider_variant_model_id(&active_model.id)
+            .map(|(_, provider_override)| provider_override.to_string())
     }
 }
 
@@ -299,6 +379,7 @@ impl PickerDelegate for AcpModelPickerDelegate {
                 .select_model(model_info.id.clone(), cx)
                 .detach_and_log_err(cx);
             self.selected_model = Some(model_info.clone());
+            self.open_provider_options_for_model_id = None;
             let current_index = self.selected_index;
             self.set_selected_index(current_index, window, cx);
 
@@ -345,6 +426,105 @@ impl PickerDelegate for AcpModelPickerDelegate {
                 };
 
                 let model_cost = model_info.cost.clone();
+                let provider_selection_models = self.provider_selection_models_for_model(model_info);
+                let (provider_selector_button, provider_options_panel) =
+                    if is_nanogpt_model_id(&model_info.id) {
+                    let selected_provider = Self::active_provider_override_for_cycle_models(
+                        &provider_selection_models,
+                        self.selected_model.as_ref(),
+                    )
+                    .unwrap_or_else(|| "Auto".to_string());
+                    let provider_button_label = format!("Provider: {selected_provider}");
+                    let provider_menu_entries = provider_selection_models
+                        .iter()
+                        .map(|provider_model| {
+                            let label = parse_provider_variant_model_id(&provider_model.id)
+                                .map(|(_, provider_override)| provider_override.to_string())
+                                .unwrap_or_else(|| "Auto".to_string());
+                            (SharedString::from(label), provider_model.id.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let show_provider_options =
+                        self.open_provider_options_for_model_id.as_ref() == Some(&model_info.id);
+                    let has_provider_options = provider_menu_entries.len() > 1;
+                    let toggle_provider_options = {
+                        let model_id = model_info.id.clone();
+                        cx.listener(move |picker, _, _, cx| {
+                            cx.stop_propagation();
+                            if !has_provider_options {
+                                return;
+                            }
+                            if picker.delegate.open_provider_options_for_model_id.as_ref()
+                                == Some(&model_id)
+                            {
+                                picker.delegate.open_provider_options_for_model_id = None;
+                            } else {
+                                picker.delegate.open_provider_options_for_model_id =
+                                    Some(model_id.clone());
+                            }
+                            cx.notify();
+                        })
+                    };
+
+                    let provider_button = h_flex().gap_1().child(
+                        Button::new(("provider-selection-trigger", ix), provider_button_label)
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .icon(if show_provider_options {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .icon_size(IconSize::XSmall)
+                            .on_click(toggle_provider_options),
+                    );
+
+                    let provider_options_panel = if show_provider_options {
+                        let mut provider_options = v_flex().w_full().px_2().pb_1().gap_0p5();
+                        for (label, provider_model_id) in provider_menu_entries {
+                            let selector = self.selector.clone();
+                            let is_active_variant =
+                                self.selected_model.as_ref().is_some_and(|model| {
+                                    model.id == provider_model_id
+                                });
+                            let select_provider_variant = {
+                                let provider_model_id = provider_model_id.clone();
+                                cx.listener(move |picker, _, _, cx| {
+                                    cx.stop_propagation();
+                                    picker.delegate.open_provider_options_for_model_id = None;
+                                    selector
+                                        .select_model(provider_model_id.clone(), cx)
+                                        .detach_and_log_err(cx);
+                                    cx.notify();
+                                })
+                            };
+
+                            provider_options = provider_options.child(
+                                Button::new(
+                                    (
+                                        gpui::ElementId::from(("provider-selection-option", ix)),
+                                        provider_model_id.0.clone(),
+                                    ),
+                                    label,
+                                )
+                                .style(if is_active_variant {
+                                    ButtonStyle::Outlined
+                                } else {
+                                    ButtonStyle::Subtle
+                                })
+                                .label_size(LabelSize::XSmall)
+                                .on_click(select_provider_variant),
+                            );
+                        }
+                        Some(provider_options.into_any_element())
+                    } else {
+                        None
+                    };
+
+                    (Some(provider_button.into_any_element()), provider_options_panel)
+                } else {
+                    (None, None)
+                };
 
                 Some(
                     div()
@@ -371,9 +551,15 @@ impl PickerDelegate for AcpModelPickerDelegate {
                                 .is_focused(selected)
                                 .is_latest(model_info.is_latest)
                                 .is_favorite(is_favorite)
+                                .when_some(provider_selector_button, |this, provider_selector| {
+                                    this.provider_selector(provider_selector)
+                                })
                                 .on_toggle_favorite(handle_action_click)
                                 .cost_info(model_cost)
                         )
+                        .when_some(provider_options_panel, |this, provider_options_panel| {
+                            this.child(provider_options_panel)
+                        })
                         .into_any_element(),
                 )
             }

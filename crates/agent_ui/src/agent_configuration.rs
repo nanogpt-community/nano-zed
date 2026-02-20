@@ -421,7 +421,14 @@ impl AgentConfiguration {
         &mut self,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let providers = LanguageModelRegistry::read_global(cx).visible_providers();
+        let mut providers = LanguageModelRegistry::read_global(cx).visible_providers();
+        if let Some(nanogpt_provider_index) = providers
+            .iter()
+            .position(|provider| provider.id().0.as_ref() == "nanogpt")
+        {
+            let nanogpt_provider = providers.remove(nanogpt_provider_index);
+            providers.insert(0, nanogpt_provider);
+        }
 
         let popover_menu = PopoverMenu::new("add-provider-popover")
             .trigger(
@@ -627,6 +634,10 @@ impl AgentConfiguration {
 
         let is_running = matches!(server_status, ContextServerStatus::Running);
         let item_id = SharedString::from(context_server_id.0.clone());
+        let context_server_config_menu_id =
+            SharedString::from(format!("context-server-config-menu-{}", context_server_id.0));
+        let context_server_switch_id =
+            SharedString::from(format!("context-server-switch-{}", context_server_id.0));
         // Servers without a configuration can only be provided by extensions.
         let provided_by_extension = server_configuration.as_ref().is_none_or(|config| {
             matches!(
@@ -688,9 +699,9 @@ impl AgentConfiguration {
             .as_ref()
             .map(|config| matches!(config.as_ref(), ContextServerConfiguration::Http { .. }))
             .unwrap_or(false);
-        let context_server_configuration_menu = PopoverMenu::new("context-server-config-menu")
+        let context_server_configuration_menu = PopoverMenu::new(context_server_config_menu_id.clone())
             .trigger_with_tooltip(
-                IconButton::new("context-server-config-menu", IconName::Settings)
+                IconButton::new(context_server_config_menu_id, IconName::Settings)
                     .icon_color(Color::Muted)
                     .icon_size(IconSize::Small),
                 Tooltip::text("Configure MCP Server"),
@@ -718,7 +729,7 @@ impl AgentConfiguration {
                                         window,
                                         cx,
                                     )
-                                    .detach();
+                                    .detach_and_log_err(cx);
                                 } else {
                                     ConfigureContextServerModal::show_modal_for_existing_server(
                                         context_server_id.clone(),
@@ -727,7 +738,7 @@ impl AgentConfiguration {
                                         window,
                                         cx,
                                     )
-                                    .detach();
+                                    .detach_and_log_err(cx);
                                 }
                             }
                         }).when(tool_count > 0, |this| this.entry("View Tools", None, {
@@ -855,10 +866,11 @@ impl AgentConfiguration {
                             .flex_none()
                             .child(context_server_configuration_menu)
                             .child(
-                            Switch::new("context-server-switch", is_running.into())
+                            Switch::new(context_server_switch_id, is_running.into())
                                 .on_click({
                                     let context_server_manager = self.context_server_store.clone();
                                     let fs = self.fs.clone();
+                                    let server_configuration = server_configuration.clone();
 
                                     move |state, _window, cx| {
                                         let is_enabled = match state {
@@ -883,6 +895,7 @@ impl AgentConfiguration {
                                         };
                                         update_settings_file(fs.clone(), cx, {
                                             let context_server_id = context_server_id.clone();
+                                            let server_configuration = server_configuration.clone();
 
                                             move |settings, _| {
                                                 settings
@@ -890,10 +903,44 @@ impl AgentConfiguration {
                                                     .context_servers
                                                     .entry(context_server_id.0)
                                                     .or_insert_with(|| {
-                                                        settings::ContextServerSettingsContent::Extension {
-                                                            enabled: is_enabled,
-                                                            remote: false,
-                                                            settings: serde_json::json!({}),
+                                                        match server_configuration.as_deref() {
+                                                            Some(ContextServerConfiguration::Custom {
+                                                                command,
+                                                                remote,
+                                                            }) => settings::ContextServerSettingsContent::Stdio {
+                                                                enabled: is_enabled,
+                                                                remote: *remote,
+                                                                command: settings::ContextServerCommand {
+                                                                    path: command.path.clone(),
+                                                                    args: command.args.clone(),
+                                                                    env: command.env.clone(),
+                                                                    timeout: command.timeout,
+                                                                },
+                                                            },
+                                                            Some(ContextServerConfiguration::Http {
+                                                                url,
+                                                                headers,
+                                                                timeout,
+                                                            }) => settings::ContextServerSettingsContent::Http {
+                                                                enabled: is_enabled,
+                                                                url: url.to_string(),
+                                                                headers: headers.clone(),
+                                                                timeout: *timeout,
+                                                            },
+                                                            Some(ContextServerConfiguration::Extension {
+                                                                settings,
+                                                                remote,
+                                                                ..
+                                                            }) => settings::ContextServerSettingsContent::Extension {
+                                                                enabled: is_enabled,
+                                                                remote: *remote,
+                                                                settings: settings.clone(),
+                                                            },
+                                                            None => settings::ContextServerSettingsContent::Extension {
+                                                                enabled: is_enabled,
+                                                                remote: false,
+                                                                settings: serde_json::json!({}),
+                                                            },
                                                         }
                                                     })
                                                     .set_enabled(is_enabled);

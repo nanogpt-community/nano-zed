@@ -1,4 +1,4 @@
-use gpui::{Action, ClickEvent, FocusHandle, prelude::*};
+use gpui::{Action, AnyElement, ClickEvent, FocusHandle, prelude::*};
 use ui::{Chip, ElevationIndex, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use zed_actions::agent::ToggleModelSelector;
 
@@ -52,6 +52,7 @@ pub struct ModelSelectorListItem {
     is_focused: bool,
     is_latest: bool,
     is_favorite: bool,
+    provider_selector: Option<AnyElement>,
     on_toggle_favorite: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     cost_info: Option<SharedString>,
 }
@@ -66,6 +67,7 @@ impl ModelSelectorListItem {
             is_focused: false,
             is_latest: false,
             is_favorite: false,
+            provider_selector: None,
             on_toggle_favorite: None,
             cost_info: None,
         }
@@ -101,6 +103,11 @@ impl ModelSelectorListItem {
         self
     }
 
+    pub fn provider_selector(mut self, provider_selector: impl IntoElement) -> Self {
+        self.provider_selector = Some(provider_selector.into_any_element());
+        self
+    }
+
     pub fn on_toggle_favorite(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -117,23 +124,40 @@ impl ModelSelectorListItem {
 
 impl RenderOnce for ModelSelectorListItem {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let model_icon_color = if self.is_selected {
+        let ModelSelectorListItem {
+            index,
+            title,
+            icon,
+            is_selected,
+            is_focused,
+            is_latest,
+            is_favorite,
+            provider_selector,
+            on_toggle_favorite,
+            cost_info,
+        } = self;
+        let has_provider_selector = provider_selector.is_some();
+        let on_toggle_favorite_hover_slot = if has_provider_selector {
+            None
+        } else {
+            on_toggle_favorite
+        };
+
+        let model_icon_color = if is_selected {
             Color::Accent
         } else {
             Color::Muted
         };
 
-        let is_favorite = self.is_favorite;
-
-        ListItem::new(self.index)
+        ListItem::new(index)
             .inset(true)
             .spacing(ListItemSpacing::Sparse)
-            .toggle_state(self.is_focused)
+            .toggle_state(is_focused)
             .child(
                 h_flex()
                     .w_full()
                     .gap_1p5()
-                    .when_some(self.icon, |this, icon| {
+                    .when_some(icon, |this, icon| {
                         this.child(
                             match icon {
                                 ModelIcon::Name(icon_name) => Icon::new(icon_name),
@@ -143,9 +167,9 @@ impl RenderOnce for ModelSelectorListItem {
                             .size(IconSize::Small),
                         )
                     })
-                    .child(Label::new(self.title).truncate())
-                    .when(self.is_latest, |parent| parent.child(Chip::new("Latest")))
-                    .when_some(self.cost_info, |this, cost_info| {
+                    .child(Label::new(title).truncate())
+                    .when(is_latest, |parent| parent.child(Chip::new("Latest")))
+                    .when_some(cost_info, |this, cost_info| {
                         let tooltip_text = if cost_info.ends_with('×') {
                             format!("Cost Multiplier: {}", cost_info)
                         } else if cost_info.contains('$') {
@@ -157,26 +181,39 @@ impl RenderOnce for ModelSelectorListItem {
                         this.child(Chip::new(cost_info).tooltip(Tooltip::text(tooltip_text)))
                     }),
             )
-            .end_slot(div().pr_2().when(self.is_selected, |this| {
-                this.child(Icon::new(IconName::Check).color(Color::Accent))
-            }))
-            .end_hover_slot(div().pr_1p5().when_some(self.on_toggle_favorite, {
-                |this, handle_click| {
-                    let (icon, color, tooltip) = if is_favorite {
-                        (IconName::StarFilled, Color::Accent, "Unfavorite Model")
-                    } else {
-                        (IconName::Star, Color::Default, "Favorite Model")
-                    };
-                    this.child(
-                        IconButton::new(("toggle-favorite", self.index), icon)
-                            .layer(ElevationIndex::ElevatedSurface)
-                            .icon_color(color)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text(tooltip))
-                            .on_click(move |event, window, cx| (handle_click)(event, window, cx)),
-                    )
-                }
-            }))
+            .end_slot(
+                h_flex()
+                    .pr_2()
+                    .gap_1()
+                    .when_some(provider_selector, |this, provider_selector| {
+                        this.child(provider_selector)
+                    })
+                    .when(is_selected, |this| {
+                        this.child(Icon::new(IconName::Check).color(Color::Accent))
+                    }),
+            )
+            .when(!has_provider_selector, |this| {
+                this.end_hover_slot(div().pr_1p5().when_some(
+                    on_toggle_favorite_hover_slot,
+                    move |this, handle_click| {
+                        let (icon, color, tooltip) = if is_favorite {
+                            (IconName::StarFilled, Color::Accent, "Unfavorite Model")
+                        } else {
+                            (IconName::Star, Color::Default, "Favorite Model")
+                        };
+                        this.child(
+                            IconButton::new(("toggle-favorite", index), icon)
+                                .layer(ElevationIndex::ElevatedSurface)
+                                .icon_color(color)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text(tooltip))
+                                .on_click(move |event, window, cx| {
+                                    (handle_click)(event, window, cx)
+                                }),
+                        )
+                    },
+                ))
+            })
     }
 }
 

@@ -26,6 +26,75 @@ use crate::{
 /// Maximum timeout for context server requests
 /// Prevents extremely large timeout values from tying up resources indefinitely.
 const MAX_TIMEOUT_SECS: u64 = 600; // 10 minutes
+const NANOGPT_CONTEXT_SERVER_ID: &str = "nanogpt";
+const NANOGPT_API_KEY_ENV_VAR_NAME: &str = "NANOGPT_API_KEY";
+const NANOGPT_DEFAULT_API_URL: &str = "https://nano-gpt.com/api/v1";
+
+fn default_nanogpt_context_server_command() -> ContextServerCommand {
+    ContextServerCommand {
+        path: "npx".into(),
+        args: vec!["-y".to_string(), "@nanogpt/mcp".to_string()],
+        env: None,
+        timeout: None,
+    }
+}
+
+fn command_has_nanogpt_api_key(command: &ContextServerCommand) -> bool {
+    command
+        .env
+        .as_ref()
+        .and_then(|environment| environment.get(NANOGPT_API_KEY_ENV_VAR_NAME))
+        .is_some_and(|api_key| !api_key.is_empty())
+}
+
+async fn resolve_nanogpt_api_key(cx: &AsyncApp) -> Option<String> {
+    if let Ok(api_key) = std::env::var(NANOGPT_API_KEY_ENV_VAR_NAME)
+        && !api_key.is_empty()
+    {
+        return Some(api_key);
+    }
+
+    let read_credentials_task = cx.update(|cx| cx.read_credentials(NANOGPT_DEFAULT_API_URL));
+    let credentials = match read_credentials_task.await {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            log::warn!("Failed to read NanoGPT API key from keychain for MCP startup: {error:#}");
+            return None;
+        }
+    };
+
+    let Some((_, api_key_bytes)) = credentials else {
+        return None;
+    };
+
+    match String::from_utf8(api_key_bytes) {
+        Ok(api_key) if !api_key.is_empty() => Some(api_key),
+        Ok(_) => None,
+        Err(error) => {
+            log::warn!("NanoGPT API key from keychain is not valid UTF-8: {error}");
+            None
+        }
+    }
+}
+
+async fn inject_nanogpt_api_key_if_needed(
+    id: &ContextServerId,
+    mut command: ContextServerCommand,
+    cx: &AsyncApp,
+) -> ContextServerCommand {
+    if id.0.as_ref() != NANOGPT_CONTEXT_SERVER_ID || command_has_nanogpt_api_key(&command) {
+        return command;
+    }
+
+    if let Some(api_key) = resolve_nanogpt_api_key(cx).await {
+        command
+            .env
+            .get_or_insert_default()
+            .insert(NANOGPT_API_KEY_ENV_VAR_NAME.to_string(), api_key);
+    }
+
+    command
+}
 
 pub fn init(cx: &mut App) {
     extension::init(cx);
@@ -146,7 +215,10 @@ impl ContextServerConfiguration {
                 enabled: _,
                 command,
                 remote,
-            } => Some(ContextServerConfiguration::Custom { command, remote }),
+            } => {
+                let command = inject_nanogpt_api_key_if_needed(&id, command, cx).await;
+                Some(ContextServerConfiguration::Custom { command, remote })
+            }
             ContextServerSettings::Extension {
                 enabled: _,
                 settings,
@@ -162,10 +234,23 @@ impl ContextServerConfiguration {
                         remote,
                     }),
                     Err(e) => {
-                        log::error!(
-                            "Failed to create context server configuration from settings: {e:#}"
-                        );
-                        None
+                        if id.0.as_ref() == NANOGPT_CONTEXT_SERVER_ID {
+                            log::warn!(
+                                "Failed to resolve NanoGPT extension command, falling back to built-in command: {e:#}"
+                            );
+                            let command = inject_nanogpt_api_key_if_needed(
+                                &id,
+                                default_nanogpt_context_server_command(),
+                                cx,
+                            )
+                            .await;
+                            Some(ContextServerConfiguration::Custom { command, remote })
+                        } else {
+                            log::error!(
+                                "Failed to create context server configuration from settings: {e:#}"
+                            );
+                            None
+                        }
                     }
                 }
             }

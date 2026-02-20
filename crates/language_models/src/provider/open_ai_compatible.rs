@@ -36,6 +36,17 @@ const NANOGPT_API_KEY_ENV_VAR_NAME: &str = "NANOGPT_API_KEY";
 const NANOGPT_DEFAULT_MODEL_ID: &str = "minimax/minimax-m2.5";
 const NANOGPT_DEFAULT_MAX_INPUT_TOKENS: u64 = 200_000;
 
+fn set_nanogpt_api_key_env_var(api_key: Option<&str>) {
+    // SAFETY: This code intentionally mutates process environment variables to support the
+    // NanoGPT-compatible client configuration path, and calls happen from serialized GPUI tasks.
+    unsafe {
+        match api_key {
+            Some(api_key) => std::env::set_var(NANOGPT_API_KEY_ENV_VAR_NAME, api_key),
+            None => std::env::remove_var(NANOGPT_API_KEY_ENV_VAR_NAME),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct ResolvedModel {
     id: String,
@@ -93,12 +104,7 @@ impl State {
 
     fn set_api_key(&mut self, api_key: Option<String>, cx: &mut Context<Self>) -> Task<Result<()>> {
         if self.is_nanogpt() {
-            match &api_key {
-                Some(api_key) if !api_key.is_empty() => {
-                    std::env::set_var(NANOGPT_API_KEY_ENV_VAR_NAME, api_key)
-                }
-                _ => std::env::remove_var(NANOGPT_API_KEY_ENV_VAR_NAME),
-            }
+            set_nanogpt_api_key_env_var(api_key.as_deref().filter(|value| !value.is_empty()));
         }
 
         let api_url = SharedString::new(self.settings.api_url.as_str());
@@ -143,11 +149,7 @@ impl State {
             return;
         }
 
-        if let Some(api_key) = self.api_key_state.key(&self.settings.api_url) {
-            std::env::set_var(NANOGPT_API_KEY_ENV_VAR_NAME, api_key.as_ref());
-        } else {
-            std::env::remove_var(NANOGPT_API_KEY_ENV_VAR_NAME);
-        }
+        set_nanogpt_api_key_env_var(self.api_key_state.key(&self.settings.api_url).as_deref());
     }
 
     fn restart_dynamic_models_task(&mut self, cx: &mut Context<Self>) {
@@ -466,7 +468,7 @@ pub struct OpenAiCompatibleLanguageModel {
 impl OpenAiCompatibleLanguageModel {
     fn stream_completion(
         &self,
-        request: open_ai::Request,
+        mut request: open_ai::Request,
         cx: &AsyncApp,
     ) -> BoxFuture<
         'static,
@@ -484,6 +486,11 @@ impl OpenAiCompatibleLanguageModel {
                 state.settings.api_url.clone(),
             )
         });
+
+        if self.model.provider_override.is_some() {
+            request.billing_mode = Some("paygo".to_string());
+        }
+
         let additional_headers =
             self.model
                 .provider_override
@@ -517,7 +524,7 @@ impl OpenAiCompatibleLanguageModel {
 
     fn stream_response(
         &self,
-        request: ResponseRequest,
+        mut request: ResponseRequest,
         cx: &AsyncApp,
     ) -> BoxFuture<'static, Result<futures::stream::BoxStream<'static, Result<ResponsesStreamEvent>>>>
     {
@@ -530,6 +537,11 @@ impl OpenAiCompatibleLanguageModel {
                 state.settings.api_url.clone(),
             )
         });
+
+        if self.model.provider_override.is_some() {
+            request.billing_mode = Some("paygo".to_string());
+        }
+
         let additional_headers =
             self.model
                 .provider_override

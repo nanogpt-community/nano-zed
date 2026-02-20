@@ -28,11 +28,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-// Another comment
 use agent_settings::{AgentProfileId, AgentSettings};
 use assistant_slash_command::SlashCommandRegistry;
 use client::Client;
 use command_palette_hooks::CommandPaletteFilter;
+use context_server::ContextServerId;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagAppExt as _};
 use fs::Fs;
 use gpui::{Action, App, Context, Entity, SharedString, Window, actions};
@@ -49,6 +49,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{LanguageModelSelection, Settings as _, SettingsStore};
 use std::any::TypeId;
+use util::ResultExt;
 use workspace::Workspace;
 
 use crate::agent_configuration::{ConfigureContextServerModal, ManageProfilesModal};
@@ -61,6 +62,7 @@ use zed_actions;
 use zed_actions::agent::OpenSettings;
 
 const NANOGPT_PROVIDER_ID: &str = "nanogpt";
+const NANOGPT_API_KEY_ENV_VAR_NAME: &str = "NANOGPT_API_KEY";
 static NANOGPT_STARTUP_PROMPT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 actions!(
@@ -301,9 +303,15 @@ pub fn init(
     inline_assistant::init(fs.clone(), prompt_builder.clone(), cx);
     terminal_inline_assistant::init(fs.clone(), prompt_builder, cx);
     cx.observe_new(move |workspace, window, cx| {
-        ConfigureContextServerModal::register(workspace, language_registry.clone(), window, cx);
-        maybe_prompt_for_nanogpt_api_key_on_startup(window, cx);
-    })
+        ConfigureContextServerModal::register(
+            workspace,
+            language_registry.clone(),
+            window.as_deref(),
+            cx,
+        );
+        subscribe_to_nanogpt_provider_state_changes(workspace, window.as_deref_mut(), cx);
+        maybe_prompt_for_nanogpt_api_key_on_startup(workspace, window, cx);
+    })th
     .detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
@@ -316,7 +324,7 @@ pub fn init(
                     .read(cx)
                     .items()
                     .find_map(|item| item.downcast::<AgentRegistryPage>());
-
+a
                 if let Some(existing) = existing {
                     workspace.activate_item(&existing, true, true, window, cx);
                 } else {
@@ -351,7 +359,77 @@ pub fn init(
     .detach();
 }
 
+fn subscribe_to_nanogpt_provider_state_changes(
+    _workspace: &mut Workspace,
+    window: Option<&mut Window>,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(window) = window else {
+        return;
+    };
+
+    cx.subscribe_in(
+        &LanguageModelRegistry::global(cx),
+        window,
+        |workspace, _, event, _window, cx| {
+            let language_model::Event::ProviderStateChanged(provider_id) = event else {
+                return;
+            };
+            if provider_id.0.as_ref() != NANOGPT_PROVIDER_ID {
+                return;
+            }
+
+            maybe_restart_nanogpt_context_server(workspace, cx);
+        },
+    )
+    .detach();
+}
+
+fn maybe_restart_nanogpt_context_server(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Ok(api_key) = std::env::var(NANOGPT_API_KEY_ENV_VAR_NAME) else {
+        return;
+    };
+    if api_key.is_empty() {
+        return;
+    }
+
+    let provider_id = LanguageModelProviderId::from(NANOGPT_PROVIDER_ID.to_string());
+    let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id) else {
+        return;
+    };
+    if !provider.is_authenticated(cx) {
+        return;
+    }
+
+    let context_server_id = ContextServerId(NANOGPT_PROVIDER_ID.into());
+    let context_server_store = workspace.project().read(cx).context_server_store();
+    context_server_store.update(cx, |store, cx| {
+        let configured_api_key =
+            store
+                .configuration_for_server(&context_server_id)
+                .and_then(|configuration| {
+                    configuration.command().and_then(|command| {
+                        command.env.as_ref().and_then(|environment| {
+                            environment
+                                .get(NANOGPT_API_KEY_ENV_VAR_NAME)
+                                .map(|api_key| api_key.to_string())
+                        })
+                    })
+                });
+
+        if configured_api_key.as_deref() == Some(api_key.as_str()) {
+            return;
+        }
+
+        if let Some(existing_server) = store.get_server(&context_server_id) {
+            store.stop_server(&context_server_id, cx).log_err();
+            store.start_server(existing_server, cx);
+        }
+    });
+}
+
 fn maybe_prompt_for_nanogpt_api_key_on_startup(
+    _workspace: &mut Workspace,
     window: Option<&mut Window>,
     cx: &mut Context<Workspace>,
 ) {
@@ -375,6 +453,7 @@ fn maybe_prompt_for_nanogpt_api_key_on_startup(
     let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id) else {
         return;
     };
+    let workspace = cx.weak_entity();
 
     cx.spawn_in(window, async move |_, cx| {
         if let Ok(authenticate_task) = cx.update(|_, cx| provider.authenticate(cx))
@@ -387,6 +466,11 @@ fn maybe_prompt_for_nanogpt_api_key_on_startup(
             .update(|_, cx| provider.is_authenticated(cx))
             .unwrap_or(false);
         if is_authenticated {
+            workspace
+                .update(cx, |workspace, cx| {
+                    maybe_restart_nanogpt_context_server(workspace, cx);
+                })
+                .log_err();
             return;
         }
 
