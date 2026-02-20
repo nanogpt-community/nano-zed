@@ -150,6 +150,7 @@ function BuildRemoteServer {
     }
 
     $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
+    New-Item -Path (Split-Path -Path $remoteServerDst -Parent) -ItemType Directory -Force | Out-Null
     Write-Output "Compressing remote_server to $remoteServerDst"
     Compress-Archive -Path $remoteServerSrc -DestinationPath $remoteServerDst -Force
 
