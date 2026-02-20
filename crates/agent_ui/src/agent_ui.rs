@@ -311,7 +311,7 @@ pub fn init(
         );
         subscribe_to_nanogpt_provider_state_changes(workspace, window.as_deref_mut(), cx);
         maybe_prompt_for_nanogpt_api_key_on_startup(workspace, window, cx);
-    })th
+    })
     .detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
@@ -324,7 +324,6 @@ pub fn init(
                     .read(cx)
                     .items()
                     .find_map(|item| item.downcast::<AgentRegistryPage>());
-a
                 if let Some(existing) = existing {
                     workspace.activate_item(&existing, true, true, window, cx);
                 } else {
