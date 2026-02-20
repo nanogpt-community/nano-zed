@@ -302,7 +302,7 @@ pub fn init(
     register_slash_commands(cx);
     inline_assistant::init(fs.clone(), prompt_builder.clone(), cx);
     terminal_inline_assistant::init(fs.clone(), prompt_builder, cx);
-    cx.observe_new(move |workspace, window, cx| {
+    cx.observe_new(move |workspace, mut window, cx| {
         ConfigureContextServerModal::register(
             workspace,
             language_registry.clone(),
