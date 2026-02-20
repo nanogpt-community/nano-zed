@@ -127,6 +127,7 @@ jobs:
         shell: pwsh
         env:
           CI: ""
+          MSVC_SPECTRE_LIBS_ALLOW_MISSING: "1"
         run: |
           script/bundle-windows.ps1 -Architecture x86_64
           New-Item -Path dist -ItemType Directory -Force | Out-Null
