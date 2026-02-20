@@ -1578,7 +1578,7 @@ const BUFFER_COUNT: usize = 3;
 pub(crate) mod shader_resources {
     use anyhow::Result;
 
-    #[cfg(not(gpui_windows_embedded_shaders))]
+    #[cfg(debug_assertions)]
     use windows::{
         Win32::Graphics::Direct3D::{
             Fxc::{D3DCOMPILE_DEBUG, D3DCOMPILE_SKIP_OPTIMIZATION, D3DCompileFromFile},
@@ -1609,17 +1609,17 @@ pub(crate) mod shader_resources {
     pub(crate) struct RawShaderBytes<'t> {
         inner: &'t [u8],
 
-        #[cfg(not(gpui_windows_embedded_shaders))]
+        #[cfg(debug_assertions)]
         _blob: ID3DBlob,
     }
 
     impl<'t> RawShaderBytes<'t> {
         pub(crate) fn new(module: ShaderModule, target: ShaderTarget) -> Result<Self> {
-            #[cfg(gpui_windows_embedded_shaders)]
+            #[cfg(not(debug_assertions))]
             {
                 Ok(Self::from_bytes(module, target))
             }
-            #[cfg(not(gpui_windows_embedded_shaders))]
+            #[cfg(debug_assertions)]
             {
                 let blob = build_shader_blob(module, target)?;
                 let inner = unsafe {
@@ -1636,7 +1636,7 @@ pub(crate) mod shader_resources {
             self.inner
         }
 
-        #[cfg(gpui_windows_embedded_shaders)]
+        #[cfg(not(debug_assertions))]
         fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
             let bytes = match module {
                 ShaderModule::Quad => match target {
@@ -1680,7 +1680,7 @@ pub(crate) mod shader_resources {
         }
     }
 
-    #[cfg(not(gpui_windows_embedded_shaders))]
+    #[cfg(debug_assertions)]
     pub(super) fn build_shader_blob(entry: ShaderModule, target: ShaderTarget) -> Result<ID3DBlob> {
         unsafe {
             use windows::Win32::Graphics::{
@@ -1746,10 +1746,10 @@ pub(crate) mod shader_resources {
         }
     }
 
-    #[cfg(gpui_windows_embedded_shaders)]
+    #[cfg(not(debug_assertions))]
     include!(concat!(env!("OUT_DIR"), "/shaders_bytes.rs"));
 
-    #[cfg(not(gpui_windows_embedded_shaders))]
+    #[cfg(debug_assertions)]
     impl ShaderModule {
         pub fn as_str(self) -> &'static str {
             match self {
