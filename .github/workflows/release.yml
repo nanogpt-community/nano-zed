@@ -29,10 +29,10 @@ env:
 
 jobs:
   build_installers:
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.platform == 'all' || github.event.inputs.platform == matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
+        platform: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.platform != 'all' && fromJSON(format('["{0}"]', github.event.inputs.platform)) || fromJSON('["linux","macos","windows"]') }}
         include:
           - platform: linux
             runner: blacksmith-8vcpu-ubuntu-2404
