@@ -90,6 +90,28 @@ jobs:
             throw "Expected AMD64 runner, got $env:PROCESSOR_ARCHITECTURE"
           }
 
+      - name: Ensure Inno Setup is installed
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command "iscc.exe" -ErrorAction SilentlyContinue)) {
+            if (Get-Command "choco.exe" -ErrorAction SilentlyContinue) {
+              choco install innosetup --no-progress -y
+            }
+          }
+
+          if (-not (Get-Command "iscc.exe" -ErrorAction SilentlyContinue)) {
+            if (Get-Command "winget.exe" -ErrorAction SilentlyContinue) {
+              winget install --id JRSoftware.InnoSetup -e --silent --accept-source-agreements --accept-package-agreements
+            }
+          }
+
+          $iscc = Get-Command "iscc.exe" -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            throw "Inno Setup ISCC.exe is not available on this runner."
+          }
+          Write-Output "Using ISCC at $($iscc.Source)"
+
       - name: Setup Node.js (macOS for DMG tooling)
         if: matrix.platform == 'macos'
         uses: actions/setup-node@v4

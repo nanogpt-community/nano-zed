@@ -328,10 +328,20 @@ function BuildInstaller {
         }
     }
 
-    # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
-    # Currently, we are using Windows 2022 runner.
-    # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
-    $innoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    $innoSetupCandidates = @()
+    $innoSetupCommand = Get-Command "iscc.exe" -ErrorAction SilentlyContinue
+    if ($innoSetupCommand) {
+        $innoSetupCandidates += $innoSetupCommand.Source
+    }
+    $innoSetupCandidates += @(
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        "C:\Program Files\Inno Setup 6\ISCC.exe",
+        "C:\ProgramData\chocolatey\bin\iscc.exe"
+    )
+    $innoSetupPath = $innoSetupCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if (-not $innoSetupPath) {
+        throw "Could not find ISCC.exe. Install Inno Setup or ensure iscc.exe is on PATH."
+    }
 
     $definitions = @{
         "AppId"          = $appId
