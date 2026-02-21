@@ -10,6 +10,16 @@ on:
         description: "Release version (for example: v0.1.0 or 0.1.0)"
         required: true
         type: string
+      platform:
+        description: "Platform to build"
+        required: false
+        type: choice
+        default: all
+        options:
+          - all
+          - linux
+          - macos
+          - windows
 
 permissions:
   contents: write
@@ -19,6 +29,7 @@ env:
 
 jobs:
   build_installers:
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.platform == 'all' || github.event.inputs.platform == matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
