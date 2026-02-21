@@ -32,17 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.platform != 'all' && fromJSON(format('["{0}"]', github.event.inputs.platform)) || fromJSON('["linux","macos","windows"]') }}
-        include:
-          - platform: linux
-            runner: blacksmith-8vcpu-ubuntu-2404
-            artifact_file: nano-zed-linux-x86_64.tar.gz
-          - platform: macos
-            runner: macos-latest
-            artifact_file: nano-zed-macos-aarch64.dmg
-          - platform: windows
-            runner: blacksmith-8vcpu-windows-2025
-            artifact_file: nano-zed-windows-x86_64.exe
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'linux' && '[{"platform":"linux","runner":"blacksmith-8vcpu-ubuntu-2404","artifact_file":"nano-zed-linux-x86_64.tar.gz"}]' || github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'macos' && '[{"platform":"macos","runner":"macos-latest","artifact_file":"nano-zed-macos-aarch64.dmg"}]' || github.event_name == 'workflow_dispatch' && github.event.inputs.platform == 'windows' && '[{"platform":"windows","runner":"blacksmith-8vcpu-windows-2025","artifact_file":"nano-zed-windows-x86_64.exe"}]' || '[{"platform":"linux","runner":"blacksmith-8vcpu-ubuntu-2404","artifact_file":"nano-zed-linux-x86_64.tar.gz"},{"platform":"macos","runner":"macos-latest","artifact_file":"nano-zed-macos-aarch64.dmg"},{"platform":"windows","runner":"blacksmith-8vcpu-windows-2025","artifact_file":"nano-zed-windows-x86_64.exe"}]') }}
 
     runs-on: ${{ matrix.runner }}
 
